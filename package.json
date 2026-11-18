@@ -1,0 +1,21 @@
+{
+  "name": "obsidian-drive-sync",
+  "version": "0.2.4",
+  "private": true,
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "auth": "node google-auth-helper.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "^1.11.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

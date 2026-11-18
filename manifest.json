@@ -1,0 +1,1 @@
+{"id":"obsidian-ai-drive-sync","name":"Drive Sync","version":"0.2.4","minAppVersion":"1.11.4","description":"Google Driveへ直接接続する安全優先の双方向同期。初回認証はWindows用ローカルツールで行います。実験版。","author":"Drive Sync contributors","isDesktopOnly":false}

@@ -1,0 +1,14 @@
+node_modules/
+data.json
+test-vault/
+client_secret*.json
+*.aidsync
+
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+token*.json
+release/
+*.zip

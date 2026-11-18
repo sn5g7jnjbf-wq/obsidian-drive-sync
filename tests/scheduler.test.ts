@@ -1,0 +1,15 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {build} from 'esbuild';import {runInNewContext} from 'node:vm';import {resolve} from 'node:path';
+async function setup(connected:boolean,settings:any={}) {
+  const r=await build({entryPoints:['src/main.ts'],bundle:true,write:false,platform:'node',format:'cjs',alias:{obsidian:resolve('tests/obsidian.mock.ts')}});
+  const module={exports:{} as any};let serial=0,layout=()=>{};const timeouts=new Map<number,{fn:()=>void;ms:number}>(),intervals=new Map<number,{fn:()=>void;ms:number}>();
+  const window={setTimeout:(fn:any,ms:number)=>{timeouts.set(++serial,{fn,ms});return serial;},setInterval:(fn:any,ms:number)=>{intervals.set(++serial,{fn,ms});return serial;},clearTimeout:(id:number)=>timeouts.delete(id),clearInterval:(id:number)=>intervals.delete(id)};
+  const document={visibilityState:'visible'};
+  runInNewContext(r.outputFiles[0].text,{module,exports:module.exports,window,document,navigator:{onLine:true},URL,URLSearchParams,crypto,TextEncoder,TextDecoder,Uint8Array,ArrayBuffer,btoa,setTimeout:window.setTimeout,console});
+  const plugin=new module.exports.default();plugin.app={secretStorage:{getSecret:()=>connected?JSON.stringify({clientId:'test.apps.googleusercontent.com',clientSecret:'fake',refreshToken:'refresh',scope:'https://www.googleapis.com/auth/drive.file'}):null},workspace:{onLayoutReady:(fn:any)=>{layout=fn;}}};
+  plugin.saved={settings:{secretId:'test-key',root:'root',backupConfirmed:true,...settings}};await plugin.onload();let runs=0;plugin.sync=async()=>{runs++;};
+  return {plugin,layout,window,document,timeouts,intervals,runs:()=>runs};
+}
+test('startup waits for vault layout, then uses default one-second delay',async()=>{const x=await setup(true,{startup:true});assert.equal(x.timeouts.size,0);x.layout();assert.equal(x.timeouts.size,1);const t=[...x.timeouts.values()][0];assert.equal(t.ms,1000);t.fn();assert.equal(x.runs(),1);});
+test('first authentication absent prevents startup; authenticated completion can schedule it',async()=>{const x=await setup(false,{startup:true});x.layout();assert.equal(x.timeouts.size,0);x.plugin.auth={connected:true};x.plugin.startup();assert.equal(x.timeouts.size,1);});
+test('automatic interval defaults to one minute and reschedules without duplicates',async()=>{const x=await setup(true,{auto:true});x.layout();assert.equal([...x.intervals.values()][0].ms,60000);x.plugin.settings.minutes=3;x.plugin.schedule();assert.equal(x.intervals.size,1);assert.equal([...x.intervals.values()][0].ms,180000);x.document.visibilityState='hidden';[...x.intervals.values()][0].fn();assert.equal(x.runs(),0);x.document.visibilityState='visible';[...x.intervals.values()][0].fn();assert.equal(x.runs(),1);x.plugin.settings.auto=false;x.plugin.schedule();assert.equal(x.intervals.size,0);});
+test('unloading clears periodic and startup timers; disabling startup cancels delay',async()=>{const x=await setup(true,{startup:true,auto:true});x.layout();x.plugin.cancelStartup();assert.equal(x.timeouts.size,0);x.plugin.onunload();assert.equal(x.intervals.size,0);assert.equal(x.plugin.unloaded,true);});

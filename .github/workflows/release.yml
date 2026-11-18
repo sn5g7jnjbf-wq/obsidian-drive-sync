@@ -1,0 +1,26 @@
+name: Experimental release
+on:
+  push:
+    tags: ['0.*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Check tag matches manifest
+        run: node -e 'if(process.env.GITHUB_REF_NAME!==JSON.parse(require("fs").readFileSync("manifest.json")).version)process.exit(1)'
+      - name: Package
+        run: zip -r obsidian-drive-sync-experimental.zip main.js manifest.json google-auth-helper.mjs Start-Auth.cmd README.md LICENSE docs
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json google-auth-helper.mjs Start-Auth.cmd obsidian-drive-sync-experimental.zip --prerelease --title "Drive Sync $GITHUB_REF_NAME (experimental)" --notes "Experimental build. Use a separate test vault. See README and docs/STATUS.md for limitations."
