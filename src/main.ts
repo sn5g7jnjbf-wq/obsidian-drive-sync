@@ -117,6 +117,11 @@ class SyncSettings extends PluginSettingTab {
   private folderOptions?:{id:string;name:string}[];
 }
 
+function modifiedLabel(value?:string|number):string {
+  const time=typeof value==='string'?Date.parse(value):value;
+  return '最終更新日時 '+(time && Number.isFinite(time)?new Date(time).toLocaleString('ja-JP'):'不明');
+}
+
 class ChooseDuplicate extends Modal {
   constructor(app:App,private plugin:DriveSync,private group:DuplicateGroup,private refresh:()=>void){super(app);}
   onOpen(){
@@ -125,6 +130,7 @@ class ChooseDuplicate extends Modal {
     this.contentEl.createEl('p',{text:`${this.group.path} が複数あります。元の名前で残すファイルを選んでください。他のファイルはDrive上で「Driveコピー」を付けた別名に変更し、すべて残します。削除・本文の上書きはしません。`});
     for(const file of this.group.files){
       const preview=this.contentEl.createEl('div');preview.createEl('h4',{text:`${file.path}（${file.size}バイト、ID末尾 ${file.id.slice(-6)}）`});
+      preview.createEl('p',{text:modifiedLabel(file.modifiedTime)});
       if(file.size<this.plugin.settings.maxMB*1024*1024)void new Drive(this.plugin.auth,this.plugin.settings.root).read(file).then(data=>{
         try{preview.createEl('pre',{text:new TextDecoder('utf-8',{fatal:true}).decode(data).slice(0,4000)});}catch{preview.createEl('p',{text:'バイナリファイル'});}
       }).catch(()=>preview.createEl('p',{text:'プレビューを取得できませんでした。'}));
@@ -150,8 +156,9 @@ class ChooseConflict extends Modal {
     this.contentEl.createEl('p',{text:m?`Driveでの移動：${m.from} → ${m.to}。移動先には端末の別ファイルがあります。`:this.path});
     this.contentEl.createEl('p',{text:'適用する直前に両側の変更を再確認します。後から変更されていれば処理を止めます。'});
     const preview=this.contentEl.createEl('div');
-    const show=(label:string,data:ArrayBuffer|undefined)=>{
+    const show=(label:string,data:ArrayBuffer|undefined,modified?:string|number)=>{
       if(this.closed)return;preview.createEl('h4',{text:label});
+      preview.createEl('p',{text:modifiedLabel(modified)});
       if(!data){preview.createEl('p',{text:'ファイルを確認できません。再同期してください。'});return;}
       try{const text=new TextDecoder('utf-8',{fatal:true}).decode(data);preview.createEl('pre',{text:text.slice(0,4000)+(text.length>4000?'\n…（先頭4000文字のみ）':'')});}
       catch{preview.createEl('p',{text:`バイナリファイル（${data.byteLength}バイト）`});}
@@ -159,10 +166,10 @@ class ChooseConflict extends Modal {
     void (async()=>{
       try{
         const local=new Local(this.app),target=m?.to??this.path;
-        if(m)show('移動元の端末版',await local.read(this.path));
-        show('端末版（移動先）',await local.read(target));
+        if(m)show('移動元の端末版',await local.read(this.path),local.modifiedTime(this.path));
+        show('端末版（移動先）',await local.read(target),local.modifiedTime(target));
         const drive=new Drive(this.plugin.auth,this.plugin.settings.root),r=(await drive.list()).find(f=>f.path===target);
-        if(r&&r.size<this.plugin.settings.maxMB*1024*1024)show('Drive版（現在の内容）',await drive.read(r));
+        if(r)show('Drive版（現在の内容）',r.size<this.plugin.settings.maxMB*1024*1024?await drive.read(r):undefined,r.modifiedTime);
       }catch{if(!this.closed)preview.createEl('p',{text:'プレビューを取得できませんでした。接続を確認して開き直してください。'});}
     })();
     const choices:[Choice,string,string][]=[

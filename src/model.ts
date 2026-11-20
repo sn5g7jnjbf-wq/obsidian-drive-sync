@@ -28,7 +28,7 @@ export interface State {
   resolution?:{from:string;to:string;remoteId:string;version:string;remoteHash:string;resultHash:string;choice:Choice;actions:{from:string;to:string;hash:string}[]};
 }
 export const emptyState = (root=''): State => ({root,base:Object.create(null),conflicts:Object.create(null),history:[]});
-export interface Remote {path:string; id:string; version:string; size:number; etag?:string; parentId?:string}
+export interface Remote {path:string; id:string; version:string; size:number; etag?:string; parentId?:string;modifiedTime?:string}
 export interface LocalPort {
   list(): Promise<{path:string;size:number}[]>;
   read(path:string): Promise<ArrayBuffer | undefined>;

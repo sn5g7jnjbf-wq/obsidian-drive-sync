@@ -229,7 +229,7 @@ function validatePaths(paths) {
 // src/drive.ts
 var API = "https://www.googleapis.com/drive/v3/files";
 var FOLDER = "application/vnd.google-apps.folder";
-var fields = "id,name,mimeType,version,size,trashed,parents";
+var fields = "id,name,mimeType,version,size,trashed,parents,modifiedTime";
 var escape = (s) => s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 var DuplicateFilesError = class extends Error {
   constructor(groups) {
@@ -304,7 +304,7 @@ var Drive = class {
       const duplicateGroups = [];
       for (const group of grouped.values()) if (group.length > 1) {
         if (group.some((f) => f.mimeType.startsWith("application/vnd.google-apps."))) throw Error("Drive\u306B\u540C\u540D\u30D5\u30A9\u30EB\u30C0\u30FBGoogle\u5F62\u5F0F\u306E\u91CD\u8907\u304C\u3042\u308A\u307E\u3059\u3002\u901A\u5E38\u30D5\u30A1\u30A4\u30EB\u4EE5\u5916\u306FDrive\u5074\u3067\u540D\u524D\u3092\u6574\u7406\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
-        const files = group.map((f) => ({ path: prefix + f.name, id: f.id, version: f.version, size: Number(f.size), parentId: id }));
+        const files = group.map((f) => ({ path: prefix + f.name, id: f.id, version: f.version, size: Number(f.size), parentId: id, modifiedTime: f.modifiedTime }));
         if (files.some((f) => !safePath(f.path) || !Number.isFinite(f.size) || f.size < 0)) throw Error("\u91CD\u8907\u30D5\u30A1\u30A4\u30EB\u306E\u540D\u524D\u30FB\u5BB9\u91CF\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002");
         duplicateGroups.push({ path: files[0].path, parentId: id, files });
       }
@@ -323,7 +323,7 @@ var Drive = class {
         else {
           const size = Number(f.size);
           if (!Number.isFinite(size) || size < 0) throw new Error("Drive\u30D5\u30A1\u30A4\u30EB\u5BB9\u91CF\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002");
-          result.push({ path, id: f.id, version: f.version, size, parentId: id });
+          result.push({ path, id: f.id, version: f.version, size, parentId: id, modifiedTime: f.modifiedTime });
         }
       }
     };
@@ -718,6 +718,10 @@ var Local = class {
   async list() {
     return this.app.vault.getFiles().filter((f) => !f.path.split("/").some((p) => p.startsWith(".") || p === "AI Drive Sync")).map((f) => ({ path: f.path, size: f.stat.size }));
   }
+  modifiedTime(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    return file instanceof import_obsidian2.TFile ? file.stat.mtime : void 0;
+  }
   async read(path) {
     const f = this.app.vault.getAbstractFileByPath(path);
     return f instanceof import_obsidian2.TFile ? this.app.vault.readBinary(f) : void 0;
@@ -1018,6 +1022,10 @@ var SyncSettings = class extends import_obsidian3.PluginSettingTab {
   }
   folderOptions;
 };
+function modifiedLabel(value) {
+  const time = typeof value === "string" ? Date.parse(value) : value;
+  return "\u6700\u7D42\u66F4\u65B0\u65E5\u6642 " + (time && Number.isFinite(time) ? new Date(time).toLocaleString("ja-JP") : "\u4E0D\u660E");
+}
 var ChooseDuplicate = class extends import_obsidian3.Modal {
   constructor(app, plugin, group, refresh) {
     super(app);
@@ -1032,6 +1040,7 @@ var ChooseDuplicate = class extends import_obsidian3.Modal {
     for (const file of this.group.files) {
       const preview = this.contentEl.createEl("div");
       preview.createEl("h4", { text: `${file.path}\uFF08${file.size}\u30D0\u30A4\u30C8\u3001ID\u672B\u5C3E ${file.id.slice(-6)}\uFF09` });
+      preview.createEl("p", { text: modifiedLabel(file.modifiedTime) });
       if (file.size < this.plugin.settings.maxMB * 1024 * 1024) void new Drive(this.plugin.auth, this.plugin.settings.root).read(file).then((data) => {
         try {
           preview.createEl("pre", { text: new TextDecoder("utf-8", { fatal: true }).decode(data).slice(0, 4e3) });
@@ -1075,9 +1084,10 @@ var ChooseConflict = class extends import_obsidian3.Modal {
     this.contentEl.createEl("p", { text: m ? `Drive\u3067\u306E\u79FB\u52D5\uFF1A${m.from} \u2192 ${m.to}\u3002\u79FB\u52D5\u5148\u306B\u306F\u7AEF\u672B\u306E\u5225\u30D5\u30A1\u30A4\u30EB\u304C\u3042\u308A\u307E\u3059\u3002` : this.path });
     this.contentEl.createEl("p", { text: "\u9069\u7528\u3059\u308B\u76F4\u524D\u306B\u4E21\u5074\u306E\u5909\u66F4\u3092\u518D\u78BA\u8A8D\u3057\u307E\u3059\u3002\u5F8C\u304B\u3089\u5909\u66F4\u3055\u308C\u3066\u3044\u308C\u3070\u51E6\u7406\u3092\u6B62\u3081\u307E\u3059\u3002" });
     const preview = this.contentEl.createEl("div");
-    const show = (label, data) => {
+    const show = (label, data, modified) => {
       if (this.closed) return;
       preview.createEl("h4", { text: label });
+      preview.createEl("p", { text: modifiedLabel(modified) });
       if (!data) {
         preview.createEl("p", { text: "\u30D5\u30A1\u30A4\u30EB\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093\u3002\u518D\u540C\u671F\u3057\u3066\u304F\u3060\u3055\u3044\u3002" });
         return;
@@ -1092,10 +1102,10 @@ var ChooseConflict = class extends import_obsidian3.Modal {
     void (async () => {
       try {
         const local = new Local(this.app), target = m?.to ?? this.path;
-        if (m) show("\u79FB\u52D5\u5143\u306E\u7AEF\u672B\u7248", await local.read(this.path));
-        show("\u7AEF\u672B\u7248\uFF08\u79FB\u52D5\u5148\uFF09", await local.read(target));
+        if (m) show("\u79FB\u52D5\u5143\u306E\u7AEF\u672B\u7248", await local.read(this.path), local.modifiedTime(this.path));
+        show("\u7AEF\u672B\u7248\uFF08\u79FB\u52D5\u5148\uFF09", await local.read(target), local.modifiedTime(target));
         const drive = new Drive(this.plugin.auth, this.plugin.settings.root), r = (await drive.list()).find((f) => f.path === target);
-        if (r && r.size < this.plugin.settings.maxMB * 1024 * 1024) show("Drive\u7248\uFF08\u73FE\u5728\u306E\u5185\u5BB9\uFF09", await drive.read(r));
+        if (r) show("Drive\u7248\uFF08\u73FE\u5728\u306E\u5185\u5BB9\uFF09", r.size < this.plugin.settings.maxMB * 1024 * 1024 ? await drive.read(r) : void 0, r.modifiedTime);
       } catch {
         if (!this.closed) preview.createEl("p", { text: "\u30D7\u30EC\u30D3\u30E5\u30FC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u63A5\u7D9A\u3092\u78BA\u8A8D\u3057\u3066\u958B\u304D\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002" });
       }

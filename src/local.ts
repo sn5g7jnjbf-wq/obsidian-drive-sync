@@ -3,6 +3,10 @@ import {hash,random,type LocalPort} from './model';
 export class Local implements LocalPort {
   constructor(readonly app:App) {}
   async list() {return this.app.vault.getFiles().filter(f=>!f.path.split('/').some(p=>p.startsWith('.')||p==='AI Drive Sync')).map(f=>({path:f.path,size:f.stat.size}));}
+  modifiedTime(path:string) {
+    const file=this.app.vault.getAbstractFileByPath(path);
+    return file instanceof TFile?file.stat.mtime:undefined;
+  }
   async read(path:string) {const f=this.app.vault.getAbstractFileByPath(path);return f instanceof TFile?this.app.vault.readBinary(f):undefined;}
   private async parents(path:string) {
     const parts=path.split('/');parts.pop();let p='';

@@ -4,8 +4,8 @@ import {http,HttpError} from './http';
 import {safePath,type DrivePort,type Remote,type DuplicateGroup} from './model';
 const API='https://www.googleapis.com/drive/v3/files';
 const FOLDER='application/vnd.google-apps.folder';
-interface FileMeta {id:string;name:string;mimeType:string;version:string;size?:string;trashed?:boolean}
-const fields='id,name,mimeType,version,size,trashed,parents';
+interface FileMeta {id:string;name:string;mimeType:string;version:string;size?:string;trashed?:boolean;modifiedTime?:string}
+const fields='id,name,mimeType,version,size,trashed,parents,modifiedTime';
 const escape=(s:string)=>s.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
 export class DuplicateFilesError extends Error {
   constructor(readonly groups:DuplicateGroup[]){super('Driveに同名ファイルがあります。設定画面で元の名前を使うファイルを選んでください。他のファイルは別名で残します。');}
@@ -48,7 +48,7 @@ export class Drive implements DrivePort {
       const duplicateGroups:DuplicateGroup[]=[];
       for(const group of grouped.values())if(group.length>1){
         if(group.some(f=>f.mimeType.startsWith('application/vnd.google-apps.')))throw Error('Driveに同名フォルダ・Google形式の重複があります。通常ファイル以外はDrive側で名前を整理してください。');
-        const files=group.map(f=>({path:prefix+f.name,id:f.id,version:f.version,size:Number(f.size),parentId:id}));
+        const files=group.map(f=>({path:prefix+f.name,id:f.id,version:f.version,size:Number(f.size),parentId:id,modifiedTime:f.modifiedTime}));
         if(files.some(f=>!safePath(f.path)||!Number.isFinite(f.size)||f.size<0))throw Error('重複ファイルの名前・容量を確認できません。');
         duplicateGroups.push({path:files[0].path,parentId:id,files});
       }
@@ -60,7 +60,7 @@ export class Drive implements DrivePort {
         const key=f.name.normalize('NFC').toLowerCase();if(names.has(key)) throw new Error('Driveに重複名があります。同期を停止しました。');names.add(key);
         if(f.mimeType===FOLDER) {this.folders.set(path,f.id);await walk(f.id,path+'/');}
         else if(f.mimeType.startsWith('application/vnd.google-apps.')) throw new Error('Google Docs形式・ショートカットは専用同期フォルダから移動してください。');
-        else {const size=Number(f.size);if(!Number.isFinite(size)||size<0) throw new Error('Driveファイル容量を確認できません。');result.push({path,id:f.id,version:f.version,size,parentId:id});}
+        else {const size=Number(f.size);if(!Number.isFinite(size)||size<0) throw new Error('Driveファイル容量を確認できません。');result.push({path,id:f.id,version:f.version,size,parentId:id,modifiedTime:f.modifiedTime});}
       }
     };await walk(this.root,'');return result;
   }
