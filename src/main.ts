@@ -1,6 +1,6 @@
 import {Plugin,PluginSettingTab,Setting,Notice,Modal,type App} from 'obsidian';
-import {Auth} from './auth';import {Drive} from './drive';import {Engine} from './engine';import {Local} from './local';
-import {defaults,loadSettings,emptyState,random,type Settings,type State} from './model';
+import {Auth} from './auth';import {Drive,DuplicateFilesError} from './drive';import {Engine} from './engine';import {Local} from './local';
+import {defaults,loadSettings,emptyState,random,type Settings,type State,type Choice,type DuplicateGroup} from './model';
 import {FILE_SCOPE} from './pairing';
 
 export default class DriveSync extends Plugin {
@@ -43,14 +43,33 @@ export default class DriveSync extends Plugin {
     this.syncing=true;this.status='同期中…';
     try {
       if(this.state.root!==this.settings.root) {this.state=emptyState(this.settings.root);await this.persist();}
+      this.state.duplicates=[];
       this.engine=new Engine(new Local(this.app),new Drive(this.auth,this.settings.root),this.state,()=>this.persist());
       const done=await this.engine.run(this.settings.maxMB*1024*1024);
       this.status=done?`同期完了（Drive検出 ${this.engine.remotePaths.length}、取得 ${this.engine.downloaded}、送信 ${this.engine.uploaded}、除外 ${this.engine.excluded.length}、保留 ${this.engine.held.length}、競合 ${Object.keys(this.state.conflicts).length}）`:'同期を停止しました';
       if(done&&this.auth.scope===FILE_SCOPE)this.status+=' ⚠ 制限付き権限：Windowsで新規作成したファイルは取得できません。Windowsの認証ツールで推奨権限を選び、接続設定を取り込み直してください。';
-    } catch(e) {this.status=e instanceof Error?e.message:'同期エラー';new Notice(this.status);}
+      const count=Object.keys(this.state.moves??{}).length;if(count)this.status+=` 移動先の選択待ち ${count}件（設定画面で選択）`;
+    } catch(e) {if(e instanceof DuplicateFilesError){this.state.duplicates=e.groups;await this.persist();}this.status=e instanceof Error?e.message:'同期エラー';new Notice(this.status);}
     finally {this.syncing=false;}
   }
   get busy() {return this.syncing||this.authBusy;}
+  async choose(path:string,choice:Choice,move:boolean){
+    if(this.busy||this.unloaded)throw Error('同期中です。完了してから選択してください。');
+    if(!this.ready||!this.auth.connected||this.state.root!==this.settings.root||!this.settings.backupConfirmed)throw Error('接続・同期先・バックアップ確認後、再同期してください。');
+    this.syncing=true;
+    try{
+      this.engine=new Engine(new Local(this.app),new Drive(this.auth,this.settings.root),this.state,()=>this.persist());
+      await this.engine.resolve(path,choice,move,this.settings.maxMB*1024*1024);this.status='選択を適用しました';
+    }finally{this.syncing=false;}
+    await this.sync();
+  }
+  async chooseDuplicate(group:DuplicateGroup,preferredId:string){
+    if(this.busy||this.unloaded||!this.auth.connected||this.state.root!==this.settings.root)throw Error('接続・同期先を確認し、同期終了後に選択してください。');
+    this.authBusy=true;
+    try{await new Drive(this.auth,this.settings.root).resolveDuplicate(group,preferredId);this.state.duplicates=[];await this.persist();}
+    finally{this.authBusy=false;}
+    await this.sync();
+  }
   onunload() {this.unloaded=true;if(this.engine)this.engine.stopped=true;if(this.timer)window.clearInterval(this.timer);if(this.startupTimer)window.clearTimeout(this.startupTimer);}
 }
 
@@ -88,9 +107,78 @@ class SyncSettings extends PluginSettingTab {
     list('Driveで検出したファイル（直近実行・最大100件）',p.engine?.remotePaths.slice(0,100)??[]);
     list('同期開始時のローカルファイル（最大100件）',p.engine?.localPaths.slice(0,100)??[]);
     list('競合ファイル',Object.values(p.state.conflicts).map(x=>x.path+' → '+x.copy));
-    c.createEl('p',{text:'競合の原本は両側に残ります。内容を比較し手動で同じ内容にすると次回に解消します。履歴は保管庫内 AI Drive Sync/history に保存します。'});
+    for(const conflict of Object.values(p.state.conflicts))action(conflict.path,'使う内容を選ぶ',async()=>{new ChooseConflict(this.app,p,conflict.path,false,()=>this.display()).open();});
+    c.createEl('h3',{text:'移動先のファイルが重複しています'});
+    for(const conflict of Object.values(p.state.moves??{}))action(conflict.from+' → '+conflict.to,'使う内容を選ぶ',async()=>{new ChooseConflict(this.app,p,conflict.from,true,()=>this.display()).open();});
+    c.createEl('h3',{text:'Drive内の同名ファイル'});
+    for(const group of p.state.duplicates??[])action(group.path,'元の名前で残すファイルを選ぶ',async()=>{new ChooseDuplicate(this.app,p,group,()=>this.display()).open();});
+    c.createEl('p',{text:'Drive内の移動・名前変更をファイルIDで追跡します。移動先に別ファイルがあると選択待ちになります。置換前の内容は AI Drive Sync/history に残します。リンク文字列の自動書換えは行いません。'});
   }
   private folderOptions?:{id:string;name:string}[];
+}
+
+class ChooseDuplicate extends Modal {
+  constructor(app:App,private plugin:DriveSync,private group:DuplicateGroup,private refresh:()=>void){super(app);}
+  onOpen(){
+    this.contentEl.createEl('h2',{text:'Drive内の同名ファイルを整理'});
+    this.contentEl.addClass('drive-sync-preview');
+    this.contentEl.createEl('p',{text:`${this.group.path} が複数あります。元の名前で残すファイルを選んでください。他のファイルはDrive上で「Driveコピー」を付けた別名に変更し、すべて残します。削除・本文の上書きはしません。`});
+    for(const file of this.group.files){
+      const preview=this.contentEl.createEl('div');preview.createEl('h4',{text:`${file.path}（${file.size}バイト、ID末尾 ${file.id.slice(-6)}）`});
+      if(file.size<this.plugin.settings.maxMB*1024*1024)void new Drive(this.plugin.auth,this.plugin.settings.root).read(file).then(data=>{
+        try{preview.createEl('pre',{text:new TextDecoder('utf-8',{fatal:true}).decode(data).slice(0,4000)});}catch{preview.createEl('p',{text:'バイナリファイル'});}
+      }).catch(()=>preview.createEl('p',{text:'プレビューを取得できませんでした。'}));
+      new Setting(this.contentEl).addButton(b=>b.setButtonText('このファイルを元の名前で残す').onClick(async()=>{
+        if(this.plugin.busy)return;b.setDisabled(true);
+        try{await this.plugin.chooseDuplicate(this.group,file.id);this.close();}
+        catch(e){new Notice(e instanceof Error?e.message:'名前変更に失敗しました。');}
+        finally{b.setDisabled(false);this.refresh();}
+      }));
+    }
+    new Setting(this.contentEl).addButton(b=>b.setButtonText('後で選ぶ').onClick(()=>this.close()));
+  }
+  onClose(){this.contentEl.empty();}
+}
+
+class ChooseConflict extends Modal {
+  private closed=false;
+  constructor(app:App,private plugin:DriveSync,private path:string,private move:boolean,private refresh:()=>void){super(app);}
+  onOpen(){
+    this.contentEl.createEl('h2',{text:'使うファイルを選ぶ'});
+    this.contentEl.addClass('drive-sync-preview');
+    const m=this.move?this.plugin.state.moves?.[this.path]:undefined;
+    this.contentEl.createEl('p',{text:m?`Driveでの移動：${m.from} → ${m.to}。移動先には端末の別ファイルがあります。`:this.path});
+    this.contentEl.createEl('p',{text:'適用する直前に両側の変更を再確認します。後から変更されていれば処理を止めます。'});
+    const preview=this.contentEl.createEl('div');
+    const show=(label:string,data:ArrayBuffer|undefined)=>{
+      if(this.closed)return;preview.createEl('h4',{text:label});
+      if(!data){preview.createEl('p',{text:'ファイルを確認できません。再同期してください。'});return;}
+      try{const text=new TextDecoder('utf-8',{fatal:true}).decode(data);preview.createEl('pre',{text:text.slice(0,4000)+(text.length>4000?'\n…（先頭4000文字のみ）':'')});}
+      catch{preview.createEl('p',{text:`バイナリファイル（${data.byteLength}バイト）`});}
+    };
+    void (async()=>{
+      try{
+        const local=new Local(this.app),target=m?.to??this.path;
+        if(m)show('移動元の端末版',await local.read(this.path));
+        show('端末版（移動先）',await local.read(target));
+        const drive=new Drive(this.plugin.auth,this.plugin.settings.root),r=(await drive.list()).find(f=>f.path===target);
+        if(r&&r.size<this.plugin.settings.maxMB*1024*1024)show('Drive版（現在の内容）',await drive.read(r));
+      }catch{if(!this.closed)preview.createEl('p',{text:'プレビューを取得できませんでした。接続を確認して開き直してください。'});}
+    })();
+    const choices:[Choice,string,string][]=[
+      ['both','両方残す',m?'Drive版を移動先へ取り込み、端末の移動元・移動先は別名で残します。別名コピーも次回以降の同期対象です。':'Drive版を元の名前で取り込み、端末版は別名で残します。別名コピーも同期対象です。'],
+      ['remote','Drive側を使う','Drive版を取り込みます。置き換える端末版は履歴へ移し、消去しません。'],
+      ['local','端末側を使う',m?'移動先に今ある端末版をDriveへ送信します。移動元の端末版と変更前のDrive版は履歴に残します。':'端末版をDriveへ送信します。変更前のDrive版は履歴に残します。']
+    ];
+    for(const [choice,label,desc] of choices)new Setting(this.contentEl).setName(label).setDesc(desc).addButton(b=>b.setButtonText(label+'を適用').onClick(async()=>{
+      if(this.plugin.busy)return;b.setDisabled(true);
+      try{await this.plugin.choose(this.path,choice,this.move);this.close();}
+      catch(e){new Notice(e instanceof Error?e.message:'選択を適用できませんでした。');}
+      finally{b.setDisabled(false);this.refresh();}
+    }));
+    new Setting(this.contentEl).addButton(b=>b.setButtonText('後で選ぶ').onClick(()=>this.close()));
+  }
+  onClose(){this.closed=true;this.contentEl.empty();}
 }
 
 class ImportSetup extends Modal {

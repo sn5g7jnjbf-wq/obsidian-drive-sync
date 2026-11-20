@@ -20,6 +20,7 @@ jobs:
           path: |
             main.js
             manifest.json
+            styles.css
             google-auth-helper.mjs
             Start-Auth.cmd
             README.md

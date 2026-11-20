@@ -15,18 +15,25 @@ export function loadSettings(value:unknown):Settings {
   return s;
 }
 export interface Base { hash: string; remoteId: string; version: string }
-export interface Journal { path: string; kind: string; id?: string; at: number }
-export interface Conflict {path: string; copy: string; localHash: string; version: string; at: number}
+export interface Journal { path: string; kind: string; id?: string; at: number; to?:string; hash?:string }
+export type Choice='both'|'remote'|'local';
+export interface MoveConflict {from:string;to:string;remoteId:string;version:string;sourceHash:string;targetHash:string}
+export interface DuplicateGroup {path:string;parentId:string;files:Remote[]}
+export interface Conflict {path: string; copy: string; localHash: string; version: string; at: number;remoteId?:string}
 export interface State {
   root: string; base: Record<string,Base>; journal?: Journal;
   conflicts: Record<string,Conflict>; history: {path:string; action:string; at:number}[]; last?:number;
+  moves?:Record<string,MoveConflict>;
+  duplicates?:DuplicateGroup[];
+  resolution?:{from:string;to:string;remoteId:string;version:string;remoteHash:string;resultHash:string;choice:Choice;actions:{from:string;to:string;hash:string}[]};
 }
 export const emptyState = (root=''): State => ({root,base:Object.create(null),conflicts:Object.create(null),history:[]});
-export interface Remote {path:string; id:string; version:string; size:number; etag?:string}
+export interface Remote {path:string; id:string; version:string; size:number; etag?:string; parentId?:string}
 export interface LocalPort {
   list(): Promise<{path:string;size:number}[]>;
   read(path:string): Promise<ArrayBuffer | undefined>;
   create(path:string,data:ArrayBuffer): Promise<void>;
+  move(from:string,to:string,expectedHash:string):Promise<boolean>;
   replace(path:string,data:ArrayBuffer,expectedHash:string): Promise<boolean>;
   archive(path:string,data:ArrayBuffer,category:'history'|'conflicts'): Promise<string>;
 }

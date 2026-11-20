@@ -9,6 +9,14 @@ export class Local implements LocalPort {
     for(const part of parts) {p=p?p+'/'+part:part;if(!this.app.vault.getAbstractFileByPath(p)) await this.app.vault.createFolder(p);}
   }
   async create(path:string,data:ArrayBuffer) {await this.parents(path);await this.app.vault.createBinary(path,data);}
+  async move(from:string,to:string,expectedHash:string) {
+    await this.parents(to);
+    const f=this.app.vault.getAbstractFileByPath(from);
+    if(!(f instanceof TFile)||this.app.vault.getAbstractFileByPath(to))return false;
+    if(await hash(await this.app.vault.readBinary(f))!==expectedHash)return false;
+    // Do not rewrite links in unrelated files while the sync snapshot is being applied.
+    await this.app.vault.rename(f,to);return true;
+  }
   async replace(path:string,data:ArrayBuffer,expectedHash:string) {
     const f=this.app.vault.getAbstractFileByPath(path);
     if(!(f instanceof TFile)||!path.toLowerCase().endsWith('.md')) return false;

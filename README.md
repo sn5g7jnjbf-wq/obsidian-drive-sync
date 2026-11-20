@@ -1,8 +1,12 @@
-# Drive Sync — experimental 0.2.4
+# Drive Sync — experimental 0.3.0
 
 Obsidianの保管庫をGoogle Driveの通常ファイルとして同期する、TypeScript製の実験版プラグインです。iPhone・iPad向けに設計し、Windowsでも動作可能な構成です。Markdownと添付ファイルの階層を維持し、Windowsから通常のファイルとして参照・編集できる形式を使います。AI処理やAIサービスへの送信機能はありません。
 
 **実験版です。最初はバックアップ済みのテスト保管庫で利用してください。** 利用者の実機環境で同期の成功報告があります。競合・障害復旧などの網羅的な実機検証は別途必要です。
+
+## 0.3.0の追加機能
+
+Drive側の移動・名前変更をファイルIDで追跡します。移動先や本文が競合した場合はプレビューを確認して「両方残す」「Drive側を使う」「端末側を使う」を選択できます。Drive上の同名通常ファイルも、元の名前で残す版を選択し、ほかを別名で保持できます。[更新手順・操作と制限](docs/UPDATE-0.3.0.md)
 
 ## 他の人が使うには
 
@@ -21,7 +25,7 @@ Obsidianの保管庫をGoogle Driveの通常ファイルとして同期する、
 
 - ローカルSHA-256とDrive versionによる差分転送。
 - 初回の同名異内容や両側変更では競合コピーを作り、原本を維持。
-- 自動削除なし。追跡済みファイルの片側消失は保留。
+- Drive内の移動・名前変更を追跡。自動削除なし。同期先外への移動・削除は保留。
 - 自動同期と起動時同期は初期OFF。間隔1分、起動待機1秒、容量上限1MB。
 - 容量上限以上のファイルは除外し、既存のクラウドファイルを削除しません。
 - 履歴と競合コピーは保管庫内のAI Drive Syncフォルダに保存し、同期から除外。
@@ -42,7 +46,7 @@ Obsidianの保管庫をGoogle Driveの通常ファイルとして同期する、
 
 Node.js 22以上で npm ci → npm run build → npm test を実行します。Node.js専用APIは認証ツール・開発処理だけで使い、プラグイン本体には使いません。
 
-GitHub Actionsで型検査・ビルド・テストと成果物の作成を行います。manifest.jsonと一致する0.x.xタグをpushすると、実験版のPrereleaseを作ります。main.jsとmanifest.jsonをReleaseの個別添付ファイルとして配布します。これらはObsidian公式の配布形式です。
+GitHub Actionsで型検査・ビルド・テストと成果物の作成を行います。mainへのmanifest.json更新、またはバージョンと一致する0.x.xタグのpushで、実験版のPrereleaseを作ります。main.jsとmanifest.jsonをReleaseの個別添付ファイルとして配布します。これらはObsidian公式の配布形式です。
 
 - [試験手順](docs/TESTING.md)
 - [検証状況](docs/STATUS.md)

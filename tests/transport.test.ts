@@ -33,3 +33,27 @@ test('failed Google verification leaves the previous connection intact',async()=
 test('disconnect clears local credentials even when Google revoke is offline',async()=>{
   const x=await bundle('src/auth.ts',async()=>{throw Error('offline');});const store=new Map([['key',JSON.stringify(creds)]]);const a=new x.api.Auth({secretStorage:{getSecret:(k:string)=>store.get(k),setSecret:(k:string,v:string)=>store.set(k,v)}},()=>({secretId:'key'}));await assert.rejects(a.disconnect());assert.equal(a.connected,false);assert.equal(store.get('key'),'');
 });
+
+test('Drive fresh refuses a rename or parent move that happened during the download',async()=>{
+ for(const metadata of [{id:'f',name:'other.md',parents:['parent'],version:'2',size:'1'},{id:'f',name:'a.md',parents:['different'],version:'2',size:'1'}]){
+  const x=await bundle('src/drive.ts',async()=>response(200,metadata));const d=new x.api.Drive({token:async()=>'t'},'root');
+  await assert.rejects(d.fresh({path:'sub/a.md',parentId:'parent',id:'f',version:'1',size:1}),/移動・名前変更/);
+ }
+});
+
+for(const failure of ['', 'stale', 'no-etag'])test('Drive duplicate selection '+(failure||'keeps all bodies and renames the unselected ID'),async()=>{
+ const files=[{id:'one',name:'a.md',mimeType:'text/markdown',version:'1',size:'3',parents:['root']},{id:'two',name:'a.md',mimeType:'text/markdown',version:'1',size:'4',parents:['root']}];let patches=0;
+ const x=await bundle('src/drive.ts',async(req:any)=>{
+  const u=new URL(req.url);
+  if(u.pathname.endsWith('/root'))return response(200,{mimeType:'application/vnd.google-apps.folder'});
+  if(u.pathname.endsWith('/files'))return response(200,{files});
+  const f=files.find(f=>u.pathname.endsWith('/'+f.id));if(!f)throw Error('unexpected');
+  if(req.method==='PATCH'){patches++;assert.equal(req.headers['If-Match'],'etag');const body=JSON.parse(req.body);assert.deepEqual(Object.keys(body),['name']);f.name=body.name;f.version='2';return response(200,f);}
+  return response(200,f,failure==='no-etag'?{}:{etag:'etag'});
+ });
+ const d=new x.api.Drive({token:async()=>'fake'},'root');let groups:any;
+ await assert.rejects(d.list(),(e:any)=>{assert.ok(e instanceof x.api.DuplicateFilesError);groups=e.groups;return true;});assert.equal(patches,0);
+ if(failure==='stale')files[1].version='2';
+ if(failure){await assert.rejects(d.resolveDuplicate(groups[0],'one'));assert.equal(patches,0);}
+ else{await d.resolveDuplicate(groups[0],'one');assert.equal(files[0].name,'a.md');assert.ok(files[1].name.includes('Driveコピー'));assert.equal(patches,1);assert.equal((await d.list()).length,2);}
+});

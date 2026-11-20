@@ -1,4 +1,5 @@
-import {hash,validatePaths, type State,type LocalPort,type DrivePort,type Remote} from './model';
+import {hash,validatePaths, type State,type LocalPort,type DrivePort,type Remote,type Choice} from './model';
+import {Moves} from './moves';
 
 export class Engine {
   running=false; stopped=false;
@@ -17,13 +18,18 @@ export class Engine {
     try {
       this.excluded=[]; this.held=[];
       this.localPaths=[];this.remotePaths=[];this.uploaded=0;this.downloaded=0;
-      const locals=await this.local.list(), remotes=await this.drive.list();
+      const moves=new Moves(this.local,this.drive,this.state,this.save);
+      await moves.resume(limit);
+      let locals=await this.local.list();const remotes=await this.drive.list();
       this.localPaths=locals.map(x=>x.path);this.remotePaths=remotes.map(x=>x.path);
       validatePaths(locals.map(x=>x.path)); validatePaths(remotes.map(x=>x.path));
       validatePaths([...new Set([...locals.map(x=>x.path),...remotes.map(x=>x.path)])]);
+      const blocked=await moves.scan(remotes,limit);
+      locals=await this.local.list();validatePaths([...new Set([...locals.map(x=>x.path),...remotes.map(x=>x.path)])]);
       const lm=new Map(locals.map(x=>[x.path,x])), rm=new Map(remotes.map(x=>[x.path,x]));
       for(const path of new Set([...lm.keys(),...rm.keys(),...Object.keys(this.state.base)])) {
         if(this.stopped) return false;
+        if(blocked.has(path)){this.held.push(path+'（移動の確認・選択待ち）');continue;}
         const l=lm.get(path), r=rm.get(path), b=this.state.base[path];
         if((l&&l.size>=limit)||(r&&r.size>=limit)) {this.excluded.push(path);continue;}
         // A missing tracked side is a deletion/move, never a request to recreate or delete.
@@ -40,7 +46,7 @@ export class Engine {
           if(rd.byteLength>=limit) {this.excluded.push(path);continue;}
           const rh=await hash(rd);
           if(lh===rh) {await this.commit(path,lh!,latest); continue;}
-          if(b&&b.remoteId===r.id&&b.version===r.version&&lh!==b.hash) {
+          if(b&&b.remoteId===r.id&&rh===b.hash&&lh!==b.hash) {
             await this.intent(path,'upload',r.id);
             await this.local.archive(path,rd,'history');
             const updated=await this.drive.put(path,data,r.id,latest);
@@ -53,10 +59,10 @@ export class Engine {
             else this.held.push(path+'（同期中に編集）');
           } else {
             const old=this.state.conflicts[path];
-            if(old?.localHash===lh&&old.version===r.version) continue;
+            if(old?.localHash===lh&&old.version===r.version&&old.remoteId===r.id) continue;
             await this.intent(path,'conflict',r.id);
             const copy=await this.local.archive(path,rd,'conflicts');
-            this.state.conflicts[path]={path,copy,localHash:lh!,version:r.version,at:Date.now()};
+            this.state.conflicts[path]={path,copy,localHash:lh!,version:r.version,remoteId:r.id,at:Date.now()};
             this.record(path,'競合コピー作成'); delete this.state.journal; await this.save();
           }
         } else if(data) {
@@ -79,6 +85,14 @@ export class Engine {
       }
       this.state.last=Date.now(); await this.save(); return true;
     } finally {this.running=false;}
+  }
+  async resolve(path:string,choice:Choice,move:boolean,limit:number){
+    if(this.running||this.stopped)throw Error('同期中です。完了後に選択してください。');
+    if(!['both','remote','local'].includes(choice)||!Number.isFinite(limit)||limit<=0)throw Error('選択・容量設定が不正です。');
+    if(this.state.resolution)throw Error('前回の選択処理を同期で再開してから選び直してください。');
+    this.running=true;
+    try{const moves=new Moves(this.local,this.drive,this.state,this.save);if(move)await moves.choose(path,choice,limit);else await moves.chooseContent(path,choice,limit);}
+    finally{this.running=false;}
   }
   private async intent(path:string,kind:string,id?:string) {
     this.state.journal={path,kind,id,at:Date.now()}; await this.save();

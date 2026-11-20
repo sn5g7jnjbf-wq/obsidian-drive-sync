@@ -2,6 +2,8 @@ name: Experimental release
 on:
   push:
     tags: ['0.*']
+    branches: [main]
+    paths: [manifest.json]
 permissions:
   contents: write
 jobs:
@@ -16,11 +18,11 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - name: Check tag matches manifest
-        run: node -e 'if(process.env.GITHUB_REF_NAME!==JSON.parse(require("fs").readFileSync("manifest.json")).version)process.exit(1)'
+      - name: Read release version
+        run: node -e 'const v=JSON.parse(require("fs").readFileSync("manifest.json")).version;if(process.env.GITHUB_REF_TYPE==="tag"&&process.env.GITHUB_REF_NAME!==v)process.exit(1);require("fs").appendFileSync(process.env.GITHUB_ENV,"VERSION="+v+"\n")'
       - name: Package
-        run: zip -r obsidian-drive-sync-experimental.zip main.js manifest.json google-auth-helper.mjs Start-Auth.cmd README.md LICENSE docs
+        run: zip -r obsidian-drive-sync-experimental.zip main.js manifest.json styles.css google-auth-helper.mjs Start-Auth.cmd README.md LICENSE docs
       - name: Publish prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json google-auth-helper.mjs Start-Auth.cmd obsidian-drive-sync-experimental.zip --prerelease --title "Drive Sync $GITHUB_REF_NAME (experimental)" --notes "Experimental build. Use a separate test vault. See README and docs/STATUS.md for limitations."
+        run: gh release create "$VERSION" main.js manifest.json styles.css google-auth-helper.mjs Start-Auth.cmd obsidian-drive-sync-experimental.zip --target "$GITHUB_SHA" --prerelease --title "Drive Sync $VERSION (experimental)" --notes "Experimental build. Drive moves, renames and conflict choices. Back up your vault before updating. See docs/UPDATE-0.3.0.md."

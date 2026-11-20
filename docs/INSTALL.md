@@ -6,7 +6,7 @@
 
 1. Obsidian 1.11.4以上を使用します。
 2. このiPhone内に新しい空の保管庫を作ります。iCloudの実保管庫を初期試験に使いません。
-3. プラグインZIPを展開し、main.jsとmanifest.jsonを保管庫の `.obsidian/plugins/obsidian-ai-drive-sync/` に配置。styles.cssは不要です。
+3. プラグインZIPを展開し、main.jsとmanifest.jsonを保管庫の `.obsidian/plugins/obsidian-ai-drive-sync/` に配置。0.3.0以降はstyles.cssも同じ場所に配置します。
 4. iOS「ファイル」でドットフォルダが操作できない場合は、PCからのファイル共有やドットフォルダを保持するZIP展開などの方法を使用します。手動導入の操作自体はiPhone実機での未検証項目です。ストア公開やBRAT登録はしていません。
 5. Obsidianを再起動し、コミュニティプラグインを利用可能にしてDrive Syncを有効化します。
 6. Windowsのローカル認証ツールで認証し、10分以内に接続設定を取り込みます。Googleの認証画面はWindowsで操作します。iPhoneのブラウザからWindowsのlocalhostページは開けません。

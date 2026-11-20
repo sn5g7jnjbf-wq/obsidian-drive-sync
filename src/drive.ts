@@ -1,12 +1,15 @@
 import {type RequestUrlParam} from 'obsidian';
 import {Auth} from './auth';
 import {http,HttpError} from './http';
-import {safePath,type DrivePort,type Remote} from './model';
+import {safePath,type DrivePort,type Remote,type DuplicateGroup} from './model';
 const API='https://www.googleapis.com/drive/v3/files';
 const FOLDER='application/vnd.google-apps.folder';
 interface FileMeta {id:string;name:string;mimeType:string;version:string;size?:string;trashed?:boolean}
-const fields='id,name,mimeType,version,size,trashed';
+const fields='id,name,mimeType,version,size,trashed,parents';
 const escape=(s:string)=>s.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+export class DuplicateFilesError extends Error {
+  constructor(readonly groups:DuplicateGroup[]){super('Driveに同名ファイルがあります。設定画面で元の名前を使うファイルを選んでください。他のファイルは別名で残します。');}
+}
 export class Drive implements DrivePort {
   private folders=new Map<string,string>();
   constructor(readonly auth:Auth,readonly root:string) {this.folders.set('',root);}
@@ -40,6 +43,16 @@ export class Drive implements DrivePort {
     const walk=async(id:string,prefix:string)=>{
       if(visited.has(id)) throw new Error('Driveフォルダの循環を検出しました。');visited.add(id);
       const siblings=await this.children(id), names=new Set<string>();
+      const grouped=new Map<string,FileMeta[]>();
+      for(const f of siblings){if(f.name.startsWith('.')||f.name==='AI Drive Sync')continue;const key=f.name.normalize('NFC').toLowerCase();grouped.set(key,[...(grouped.get(key)??[]),f]);}
+      const duplicateGroups:DuplicateGroup[]=[];
+      for(const group of grouped.values())if(group.length>1){
+        if(group.some(f=>f.mimeType.startsWith('application/vnd.google-apps.')))throw Error('Driveに同名フォルダ・Google形式の重複があります。通常ファイル以外はDrive側で名前を整理してください。');
+        const files=group.map(f=>({path:prefix+f.name,id:f.id,version:f.version,size:Number(f.size),parentId:id}));
+        if(files.some(f=>!safePath(f.path)||!Number.isFinite(f.size)||f.size<0))throw Error('重複ファイルの名前・容量を確認できません。');
+        duplicateGroups.push({path:files[0].path,parentId:id,files});
+      }
+      if(duplicateGroups.length)throw new DuplicateFilesError(duplicateGroups);
       for(const f of siblings) {
         if(f.name.startsWith('.')||f.name==='AI Drive Sync') continue;
         const path=prefix+f.name;
@@ -47,17 +60,34 @@ export class Drive implements DrivePort {
         const key=f.name.normalize('NFC').toLowerCase();if(names.has(key)) throw new Error('Driveに重複名があります。同期を停止しました。');names.add(key);
         if(f.mimeType===FOLDER) {this.folders.set(path,f.id);await walk(f.id,path+'/');}
         else if(f.mimeType.startsWith('application/vnd.google-apps.')) throw new Error('Google Docs形式・ショートカットは専用同期フォルダから移動してください。');
-        else {const size=Number(f.size);if(!Number.isFinite(size)||size<0) throw new Error('Driveファイル容量を確認できません。');result.push({path,id:f.id,version:f.version,size});}
+        else {const size=Number(f.size);if(!Number.isFinite(size)||size<0) throw new Error('Driveファイル容量を確認できません。');result.push({path,id:f.id,version:f.version,size,parentId:id});}
       }
     };await walk(this.root,'');return result;
   }
   async fresh(file:Remote):Promise<Remote> {
     const r=await this.request({url:API+'/'+encodeURIComponent(file.id)+'?fields='+fields});
     if(r.json.trashed) throw new Error('Driveファイルが削除されました。');
+    if(r.json.name!==file.path.split('/').pop()||(file.parentId&&!r.json.parents?.includes(file.parentId)))throw new Error('Driveで同期中の移動・名前変更を検出しました。再同期してください。');
     return {...file,version:r.json.version,size:Number(r.json.size),etag:r.headers.etag??r.headers.ETag};
   }
   async read(file:Remote):Promise<ArrayBuffer> {return (await this.request({url:API+'/'+encodeURIComponent(file.id)+'?alt=media'})).arrayBuffer;}
   async generateId():Promise<string> {return (await this.request({url:API+'/generateIds?count=1&space=drive&type=files'})).json.ids[0];}
+  async resolveDuplicate(group:DuplicateGroup,preferredId:string){
+    const preferred=group.files.find(f=>f.id===preferredId);if(!preferred)throw Error('選択したファイルがありません。');
+    const siblings=await this.children(group.parentId),key=preferred.path.split('/').pop()!.normalize('NFC').toLowerCase();
+    const current=siblings.filter(f=>f.name.normalize('NFC').toLowerCase()===key);
+    if(current.length!==group.files.length||current.some(f=>!group.files.some(old=>old.id===f.id&&old.version===f.version)))throw Error('重複ファイルが変更されました。再同期して選び直してください。');
+    const names=new Set(siblings.map(f=>f.name.normalize('NFC').toLowerCase()));
+    for(const file of group.files){
+      if(file.id===preferredId)continue;
+      const latest=await this.fresh(file);if(latest.version!==file.version||!latest.etag)throw Error('変更検出用の情報を確認できないため、Driveの名前変更を停止しました。再同期してください。');
+      const old=file.path.split('/').pop()!,dot=old.lastIndexOf('.'),stem=dot>0?old.slice(0,dot):old,ext=dot>0?old.slice(dot):'';
+      let name='',n=0;do{name=`${stem.slice(0,100)} (Driveコピー ${++n}-${file.id.slice(-6)})${ext}`;}while(names.has(name.normalize('NFC').toLowerCase()));
+      if(!safePath(file.path.slice(0,file.path.lastIndexOf('/')+1)+name))throw Error('別名が長すぎます。Drive側で短い名前に変更してください。');
+      names.add(name.normalize('NFC').toLowerCase());
+      await this.request({url:API+'/'+encodeURIComponent(file.id)+'?fields='+fields,method:'PATCH',contentType:'application/json',headers:{'If-Match':latest.etag},body:JSON.stringify({name})},false);
+    }
+  }
   private async parent(path:string):Promise<string> {
     const parts=path.split('/');parts.pop();let prefix='',id=this.root;
     for(const part of parts) {

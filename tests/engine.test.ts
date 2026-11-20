@@ -4,9 +4,10 @@ const bytes=(s:string)=>new TextEncoder().encode(s).buffer;
 const text=(b:ArrayBuffer)=>new TextDecoder().decode(b);
 class Local implements LocalPort {
   files=new Map<string,ArrayBuffer>();archives:{path:string;data:ArrayBuffer;kind:string}[]=[];reject=false;
-  async list(){return [...this.files].map(([path,d])=>({path,size:d.byteLength}));}
+  async list(){return [...this.files].filter(([path])=>!path.split('/').some(p=>p.startsWith('.')||p==='AI Drive Sync')).map(([path,d])=>({path,size:d.byteLength}));}
   async read(p:string){return this.files.get(p);}
   async create(p:string,d:ArrayBuffer){if(this.files.has(p))throw Error('exists');this.files.set(p,d);}
+  async move(from:string,to:string,h:string){if(this.reject||!this.files.has(from)||this.files.has(to)||await hash(this.files.get(from)!)!==h)return false;this.files.set(to,this.files.get(from)!);this.files.delete(from);return true;}
   async replace(p:string,d:ArrayBuffer,h:string){if(this.reject||!this.files.has(p)||await hash(this.files.get(p)!)!==h)return false;this.files.set(p,d);return true;}
   async archive(p:string,d:ArrayBuffer,kind:'history'|'conflicts'){this.archives.push({path:p,data:d,kind});return 'AI Drive Sync/'+kind+'/'+this.archives.length+'/'+p;}
 }
@@ -57,4 +58,88 @@ test('empty remote tekito.md is downloaded and diagnosed, then a repeat run has 
  assert.ok(x.local.files.has('tekito.md'));assert.equal(x.local.files.get('tekito.md')!.byteLength,0);
  assert.deepEqual(x.e.remotePaths,['tekito.md']);assert.equal(x.e.downloaded,1);assert.equal(x.e.uploaded,0);
  await x.e.run(100);assert.equal(x.e.downloaded,0);assert.equal(x.e.uploaded,0);assert.deepEqual(x.e.localPaths,['tekito.md']);
+});
+
+function remoteMove(x:ReturnType<typeof setup>,from:string,to:string){const f=x.drive.files.get(from)!;x.drive.files.delete(from);x.drive.files.set(to,{data:f.data,meta:{...f.meta,path:to,version:String(Number(f.meta.version)+1)}});}
+test('remote move and rename preserve ID without leaving the old local path',async()=>{
+ const x=await baseline();const id=x.state.base['a.md'].remoteId;remoteMove(x,'a.md','folder/renamed.md');await x.e.run(100);
+ assert.ok(!x.local.files.has('a.md'));assert.equal(text(x.local.files.get('folder/renamed.md')!),'v1');assert.equal(x.state.base['folder/renamed.md'].remoteId,id);assert.equal(x.state.base['a.md'],undefined);assert.equal(x.drive.puts,0);
+ await x.e.run(100);assert.equal(x.local.files.size,1);
+});
+test('folder move handles several files independently',async()=>{
+ const x=setup();for(const p of ['one/a.md','one/b.md']){x.local.files.set(p,bytes(p));x.drive.add(p,p);}await x.e.run(100);
+ for(const p of ['one/a.md','one/b.md'])remoteMove(x,p,p.replace('one/','two/'));await x.e.run(100);
+ assert.ok(x.local.files.has('two/a.md'));assert.ok(x.local.files.has('two/b.md'));assert.ok(!x.local.files.has('one/a.md'));assert.equal(x.drive.puts,0);
+});
+test('remote move plus remote content edit downloads at the new path',async()=>{
+ const x=await baseline();remoteMove(x,'a.md','sub/b.md');x.drive.edit('sub/b.md','remote edit');await x.e.run(100);assert.equal(text(x.local.files.get('sub/b.md')!),'remote edit');assert.ok(!x.local.files.has('a.md'));
+});
+test('remote move and local edit safely upload the unchanged remote baseline',async()=>{
+ const x=await baseline();x.local.files.set('a.md',bytes('local edit'));remoteMove(x,'a.md','sub/b.md');await x.e.run(100);assert.equal(text(x.drive.files.get('sub/b.md')!.data),'local edit');assert.equal(Object.keys(x.state.conflicts).length,0);
+});
+test('move and simultaneous content edits keep both and ask for content selection',async()=>{
+ const x=await baseline();x.local.files.set('a.md',bytes('local edit'));remoteMove(x,'a.md','sub/b.md');x.drive.edit('sub/b.md','remote edit');await x.e.run(100);
+ assert.equal(text(x.local.files.get('sub/b.md')!),'local edit');assert.ok(x.state.conflicts['sub/b.md']);assert.equal(x.drive.puts,0);
+});
+async function collision(){const x=await baseline();x.local.files.set('dest.md',bytes('incumbent'));remoteMove(x,'a.md','dest.md');await x.e.run(100);return x;}
+test('occupied destination blocks both paths and persists a choice across restart',async()=>{
+ const x=await collision();assert.ok(x.state.moves!['a.md']);assert.equal(text(x.local.files.get('a.md')!),'v1');assert.equal(text(x.local.files.get('dest.md')!),'incumbent');assert.equal(x.drive.puts,0);
+ const state=JSON.parse(JSON.stringify(x.state)),e=new Engine(x.local,x.drive,state,async()=>{});await e.run(100);assert.ok(state.moves['a.md']);assert.equal(x.drive.puts,0);
+});
+for(const choice of ['both','remote','local'] as const)test('move collision choice '+choice+' preserves displaced data',async()=>{
+ const x=await collision();await x.e.resolve('a.md',choice,true,100);
+ assert.ok(!x.local.files.has('a.md'));assert.equal(text(x.local.files.get('dest.md')!),choice==='local'?'incumbent':'v1');assert.equal(text(x.drive.files.get('dest.md')!.data),choice==='local'?'incumbent':'v1');
+ assert.ok([...x.local.files.values()].some(d=>text(d)==='v1'));assert.ok([...x.local.files.values()].some(d=>text(d)==='incumbent'));
+ assert.equal(Object.keys(x.state.moves!).length,0);assert.equal(x.state.base['dest.md'].remoteId,x.drive.files.get('dest.md')!.meta.id);
+ await x.e.run(100);assert.equal(Object.keys(x.state.moves!).length,0);
+});
+for(const choice of ['both','remote','local'] as const)test('content conflict choice '+choice+' preserves the replaced version',async()=>{
+ const x=await baseline();x.local.files.set('a.md',bytes('local2'));x.drive.edit('a.md','remote2');await x.e.run(100);await x.e.resolve('a.md',choice,false,100);
+ assert.equal(text(x.local.files.get('a.md')!),choice==='local'?'local2':'remote2');assert.equal(text(x.drive.files.get('a.md')!.data),choice==='local'?'local2':'remote2');assert.ok(x.state.base['a.md']);assert.ok(!x.state.conflicts['a.md']);
+ assert.ok([...x.local.files.values(),...x.local.archives.map(a=>a.data)].some(d=>text(d)===(choice==='local'?'remote2':'local2')));
+});
+test('stale choice refuses remote or local changes before any mutation',async()=>{
+ for(const side of ['remote','source','target']){const x=await collision();if(side==='remote')x.drive.edit('dest.md','edited');else x.local.files.set(side==='source'?'a.md':'dest.md',bytes('edited'));
+ await assert.rejects(x.e.resolve('a.md','remote',true,100));assert.ok(x.local.files.has('a.md'));assert.equal(x.drive.puts,0);}
+});
+test('excluded move never moves or uploads either path',async()=>{
+ const x=await baseline();remoteMove(x,'a.md','b.md');x.drive.edit('b.md','1234567890');await x.e.run(5);assert.ok(x.local.files.has('a.md'));assert.ok(!x.local.files.has('b.md'));assert.equal(x.drive.puts,0);
+});
+test('move outside root is held without deleting local file',async()=>{
+ const x=await baseline();x.drive.files.delete('a.md');await x.e.run(100);assert.ok(x.local.files.has('a.md'));assert.equal(x.e.held.length,1);
+});
+test('ambiguous local rename resumes after restart without duplicate files',async()=>{
+ const x=await baseline();remoteMove(x,'a.md','b.md');const move=x.local.move.bind(x.local);let fail=true;
+ x.local.move=async(...args)=>{const result=await move(...args);if(fail){fail=false;throw Error('closed');}return result;};await assert.rejects(x.e.run(100));
+ const state=JSON.parse(JSON.stringify(x.state));assert.equal(state.journal.kind,'move-local');const e=new Engine(x.local,x.drive,state,async()=>{});await e.run(100);assert.ok(state.base['b.md']);assert.ok(!state.base['a.md']);assert.equal(x.local.files.size,1);
+});
+test('selection resumes after an ambiguous rename preserving all versions',async()=>{
+ const x=await collision(),move=x.local.move.bind(x.local);let fail=true;
+ x.local.move=async(...args)=>{const result=await move(...args);if(fail){fail=false;throw Error('closed');}return result;};await assert.rejects(x.e.resolve('a.md','both',true,100));
+ const state=JSON.parse(JSON.stringify(x.state)),e=new Engine(x.local,x.drive,state,async()=>{});await e.run(100);assert.ok(!state.resolution);assert.equal(text(x.local.files.get('dest.md')!),'v1');assert.ok([...x.local.files.values()].some(d=>text(d)==='incumbent'));
+});
+test('ambiguous upload choice resumes without sending the body a second time',async()=>{
+ const x=await collision();x.drive.failAfter=true;await assert.rejects(x.e.resolve('a.md','local',true,100));x.drive.failAfter=false;
+ const state=JSON.parse(JSON.stringify(x.state)),e=new Engine(x.local,x.drive,state,async()=>{});await e.run(100);assert.equal(x.drive.puts,1);assert.ok(!state.resolution);assert.equal(text(x.local.files.get('dest.md')!),'incumbent');
+});
+test('resolution plan persistence failure causes no mutation',async()=>{
+ const x=await collision(),e=new Engine(x.local,x.drive,x.state,async()=>{throw Error('disk full');});await assert.rejects(e.resolve('a.md','remote',true,100));assert.ok(x.local.files.has('a.md'));assert.equal(text(x.local.files.get('dest.md')!),'incumbent');
+});
+
+test('invalid persisted resolution path cannot mutate a vault',async()=>{
+ const x=await collision();(x.state as any).resolution={from:'a.md',to:'dest.md',remoteId:'r0',choice:'remote',actions:[{from:'a.md',to:'../outside.md',hash:'x'}]};
+ await assert.rejects(x.e.run(100),/パスが不正/);assert.ok(x.local.files.has('a.md'));assert.equal(x.drive.puts,0);
+});
+test('a failed conditional upload leaves the occupied destination and source intact',async()=>{
+ const x=await collision();x.drive.failBefore=true;await assert.rejects(x.e.resolve('a.md','local',true,100));assert.equal(text(x.local.files.get('a.md')!),'v1');assert.equal(text(x.local.files.get('dest.md')!),'incumbent');
+ x.drive.failBefore=false;const state=JSON.parse(JSON.stringify(x.state)),e=new Engine(x.local,x.drive,state,async()=>{});await e.run(100);assert.ok(!state.resolution);assert.equal(text(x.drive.files.get('dest.md')!.data),'incumbent');
+});
+test('binary move collision and remote choice preserve exact bytes',async()=>{
+ const x=await baseline('a.bin');x.local.files.set('b.bin',new Uint8Array([255,0,128]).buffer);remoteMove(x,'a.bin','b.bin');await x.e.run(100);await x.e.resolve('a.bin','remote',true,100);
+ assert.equal(text(x.local.files.get('b.bin')!),'v1');assert.ok([...x.local.files.values()].some(d=>new Uint8Array(d)[0]===255));
+});
+
+test('a renamed tracked ID and a different ID replacing its old name are both retained',async()=>{
+ const x=await baseline();remoteMove(x,'a.md','a (Drive copy).md');x.drive.add('a.md','different','another-id');await x.e.run(100);
+ assert.equal(text(x.local.files.get('a.md')!),'different');assert.equal(text(x.local.files.get('a (Drive copy).md')!),'v1');assert.equal(x.drive.puts,0);
 });
