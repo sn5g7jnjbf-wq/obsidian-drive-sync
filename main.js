@@ -196,6 +196,8 @@ function loadSettings(value) {
   }
   if (typeof v.root === "string" && v.root.length <= 256) s.root = v.root.trim();
   if (typeof v.secretId === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v.secretId)) s.secretId = v.secretId;
+  s.markdownOnly = v.markdownOnly === true;
+  if (typeof v.excludedPaths === "string") s.excludedPaths = v.excludedPaths;
   return s;
 }
 var emptyState = (root = "") => ({ root, base: /* @__PURE__ */ Object.create(null), conflicts: /* @__PURE__ */ Object.create(null), history: [] });
@@ -224,6 +226,14 @@ function validatePaths(paths) {
       parts.pop();
     }
   }
+}
+function syncFilter(settings) {
+  const normalize = (value) => value.normalize("NFC").toLowerCase();
+  const excluded = (settings.excludedPaths ?? "").split(/\r?\n/).map((line) => normalize(line.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, ""))).filter(Boolean);
+  return (path) => {
+    const key2 = normalize(path);
+    return (!settings.markdownOnly || key2.endsWith(".md")) && !excluded.some((prefix) => key2 === prefix || key2.startsWith(prefix + "/"));
+  };
 }
 
 // src/drive.ts
@@ -421,7 +431,7 @@ var Moves = class {
     delete this.state.journal;
     await this.save();
   }
-  async scan(remotes, limit) {
+  async scan(remotes, limit, includes) {
     const blocked = /* @__PURE__ */ new Set(), byId = new Map(remotes.map((r) => [r.id, r]));
     const pending = this.state.journal;
     if (pending?.kind === "move-local") {
@@ -430,7 +440,7 @@ var Moves = class {
       const source = await this.local.read(from), target = await this.local.read(to);
       if (!source && target && await hash(target) === pending.hash) await this.migrate(from, to);
       else if (source && !target && await hash(source) === pending.hash) {
-        if (!await this.local.move(from, to, pending.hash)) throw Error("\u4E2D\u65AD\u3057\u305F\u79FB\u52D5\u3092\u518D\u958B\u3067\u304D\u307E\u305B\u3093\u3002");
+        if (!await this.local.move(from, to, pending.hash, true)) throw Error("\u4E2D\u65AD\u3057\u305F\u79FB\u52D5\u3092\u518D\u958B\u3067\u304D\u307E\u305B\u3093\u3002");
         await this.migrate(from, to);
       } else throw Error("\u4E2D\u65AD\u3057\u305F\u79FB\u52D5\u306E\u30D5\u30A1\u30A4\u30EB\u304C\u5909\u66F4\u3055\u308C\u3066\u3044\u307E\u3059\u3002\u4E0A\u66F8\u304D\u305B\u305A\u505C\u6B62\u3057\u307E\u3057\u305F\u3002");
     }
@@ -443,6 +453,10 @@ var Moves = class {
       const to = r.path;
       blocked.add(from);
       blocked.add(to);
+      if (!includes(from) || !includes(to)) {
+        delete this.state.moves[from];
+        continue;
+      }
       const source = await this.local.read(from), target = await this.local.read(to);
       if (this.state.base[to] && this.state.base[to].remoteId !== r.id) continue;
       if (!source) continue;
@@ -456,7 +470,7 @@ var Moves = class {
       if (latest.version !== r.version) throw Error("Drive\u3067\u79FB\u52D5\u4E2D\u306E\u7DE8\u96C6\u3092\u691C\u51FA\u3057\u307E\u3057\u305F\u3002\u518D\u540C\u671F\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       this.state.journal = { path: from, to, kind: "move-local", id: r.id, hash: sourceHash, at: Date.now() };
       await this.save();
-      if (!await this.local.move(from, to, sourceHash)) throw Error("\u79FB\u52D5\u4E2D\u306B\u7AEF\u672B\u306E\u30D5\u30A1\u30A4\u30EB\u304C\u5909\u308F\u308A\u307E\u3057\u305F\u3002\u518D\u540C\u671F\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+      if (!await this.local.move(from, to, sourceHash, true)) throw Error("\u79FB\u52D5\u4E2D\u306B\u7AEF\u672B\u306E\u30D5\u30A1\u30A4\u30EB\u304C\u5909\u308F\u308A\u307E\u3057\u305F\u3002\u518D\u540C\u671F\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
       await this.migrate(from, to);
       blocked.delete(from);
       blocked.delete(to);
@@ -567,7 +581,7 @@ var Engine = class {
   remotePaths = [];
   uploaded = 0;
   downloaded = 0;
-  async run(limit) {
+  async run(limit, includes = () => true) {
     if (this.running || this.stopped) return false;
     if (!Number.isFinite(limit) || limit <= 0) throw new Error("\u5BB9\u91CF\u4E0A\u9650\u306E\u8A2D\u5B9A\u304C\u4E0D\u6B63\u3067\u3059\u3002");
     this.running = true;
@@ -587,12 +601,16 @@ var Engine = class {
       validatePaths(locals.map((x) => x.path));
       validatePaths(remotes.map((x) => x.path));
       validatePaths([.../* @__PURE__ */ new Set([...locals.map((x) => x.path), ...remotes.map((x) => x.path)])]);
-      const blocked = await moves.scan(remotes, limit);
+      const blocked = await moves.scan(remotes, limit, includes);
       locals = await this.local.list();
       validatePaths([.../* @__PURE__ */ new Set([...locals.map((x) => x.path), ...remotes.map((x) => x.path)])]);
       const lm = new Map(locals.map((x) => [x.path, x])), rm = new Map(remotes.map((x) => [x.path, x]));
       for (const path of /* @__PURE__ */ new Set([...lm.keys(), ...rm.keys(), ...Object.keys(this.state.base)])) {
         if (this.stopped) return false;
+        if (!includes(path)) {
+          this.excluded.push(path);
+          continue;
+        }
         if (blocked.has(path)) {
           this.held.push(path + "\uFF08\u79FB\u52D5\u306E\u78BA\u8A8D\u30FB\u9078\u629E\u5F85\u3061\uFF09");
           continue;
@@ -739,12 +757,14 @@ var Local = class {
     await this.parents(path);
     await this.app.vault.createBinary(path, data);
   }
-  async move(from, to, expectedHash) {
+  async move(from, to, expectedHash, updateLinks = false) {
     await this.parents(to);
     const f = this.app.vault.getAbstractFileByPath(from);
     if (!(f instanceof import_obsidian2.TFile) || this.app.vault.getAbstractFileByPath(to)) return false;
     if (await hash(await this.app.vault.readBinary(f)) !== expectedHash) return false;
-    await this.app.vault.rename(f, to);
+    if (f.path !== from || this.app.vault.getAbstractFileByPath(to)) return false;
+    if (updateLinks) await this.app.fileManager.renameFile(f, to);
+    else await this.app.vault.rename(f, to);
     return true;
   }
   async replace(path, data, expectedHash) {
@@ -767,6 +787,30 @@ var Local = class {
     return dest;
   }
 };
+
+// src/line-diff.ts
+function lineDiff(local, remote) {
+  const before = local.split(/\r?\n/), after = remote.split(/\r?\n/);
+  if (before.length > 1e3 || after.length > 1e3) return "\u884C\u6570\u304C\u591A\u3044\u305F\u3081\u5DEE\u5206\u3092\u8868\u793A\u3067\u304D\u307E\u305B\u3093\u3002";
+  const lengths = Array.from({ length: before.length + 1 }, () => new Uint16Array(after.length + 1));
+  for (let i2 = before.length - 1; i2 >= 0; i2--)
+    for (let j2 = after.length - 1; j2 >= 0; j2--)
+      lengths[i2][j2] = before[i2] === after[j2] ? 1 + lengths[i2 + 1][j2 + 1] : Math.max(lengths[i2 + 1][j2], lengths[i2][j2 + 1]);
+  const changes = [];
+  let i = 0, j = 0;
+  while (i < before.length || j < after.length) {
+    if (i < before.length && j < after.length && before[i] === after[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (j === after.length || i < before.length && lengths[i + 1][j] >= lengths[i][j + 1])
+      changes.push("- " + (i + 1) + " " + before[i++]);
+    else changes.push("+ " + (j + 1) + " " + after[j++]);
+  }
+  const result = changes.join("\n");
+  return result.length > 12e3 ? result.slice(0, 12e3) + "\n\u2026\uFF08\u5DEE\u5206\u306E\u5148\u982D\u306E\u307F\uFF09" : result || "\u884C\u5358\u4F4D\u306E\u5DEE\u5206\u306F\u3042\u308A\u307E\u305B\u3093\u3002";
+}
 
 // src/main.ts
 var DriveSync = class extends import_obsidian3.Plugin {
@@ -856,7 +900,7 @@ var DriveSync = class extends import_obsidian3.Plugin {
       }
       this.state.duplicates = [];
       this.engine = new Engine(new Local(this.app), new Drive(this.auth, this.settings.root), this.state, () => this.persist());
-      const done = await this.engine.run(this.settings.maxMB * 1024 * 1024);
+      const done = await this.engine.run(this.settings.maxMB * 1024 * 1024, syncFilter(this.settings));
       this.status = done ? `\u540C\u671F\u5B8C\u4E86\uFF08Drive\u691C\u51FA ${this.engine.remotePaths.length}\u3001\u53D6\u5F97 ${this.engine.downloaded}\u3001\u9001\u4FE1 ${this.engine.uploaded}\u3001\u9664\u5916 ${this.engine.excluded.length}\u3001\u4FDD\u7559 ${this.engine.held.length}\u3001\u7AF6\u5408 ${Object.keys(this.state.conflicts).length}\uFF09` : "\u540C\u671F\u3092\u505C\u6B62\u3057\u307E\u3057\u305F";
       if (done && this.auth.scope === FILE_SCOPE) this.status += " \u26A0 \u5236\u9650\u4ED8\u304D\u6A29\u9650\uFF1AWindows\u3067\u65B0\u898F\u4F5C\u6210\u3057\u305F\u30D5\u30A1\u30A4\u30EB\u306F\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3002Windows\u306E\u8A8D\u8A3C\u30C4\u30FC\u30EB\u3067\u63A8\u5968\u6A29\u9650\u3092\u9078\u3073\u3001\u63A5\u7D9A\u8A2D\u5B9A\u3092\u53D6\u308A\u8FBC\u307F\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002";
       const count = Object.keys(this.state.moves ?? {}).length;
@@ -878,6 +922,8 @@ var DriveSync = class extends import_obsidian3.Plugin {
   async choose(path, choice, move) {
     if (this.busy || this.unloaded) throw Error("\u540C\u671F\u4E2D\u3067\u3059\u3002\u5B8C\u4E86\u3057\u3066\u304B\u3089\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
     if (!this.ready || !this.auth.connected || this.state.root !== this.settings.root || !this.settings.backupConfirmed) throw Error("\u63A5\u7D9A\u30FB\u540C\u671F\u5148\u30FB\u30D0\u30C3\u30AF\u30A2\u30C3\u30D7\u78BA\u8A8D\u5F8C\u3001\u518D\u540C\u671F\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+    const includes = syncFilter(this.settings), destination = this.state.moves?.[path]?.to;
+    if (!includes(path) || move && destination && !includes(destination)) throw Error("\u540C\u671F\u5BFE\u8C61\u5916\u306E\u30D5\u30A1\u30A4\u30EB\u3067\u3059\u3002");
     this.syncing = true;
     try {
       this.engine = new Engine(new Local(this.app), new Drive(this.auth, this.settings.root), this.state, () => this.persist());
@@ -890,6 +936,7 @@ var DriveSync = class extends import_obsidian3.Plugin {
   }
   async chooseDuplicate(group, preferredId) {
     if (this.busy || this.unloaded || !this.auth.connected || this.state.root !== this.settings.root) throw Error("\u63A5\u7D9A\u30FB\u540C\u671F\u5148\u3092\u78BA\u8A8D\u3057\u3001\u540C\u671F\u7D42\u4E86\u5F8C\u306B\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002");
+    if (group.files.some((file) => !syncFilter(this.settings)(file.path))) throw Error("\u540C\u671F\u5BFE\u8C61\u5916\u306E\u30D5\u30A1\u30A4\u30EB\u3067\u3059\u3002");
     this.authBusy = true;
     try {
       await new Drive(this.auth, this.settings.root).resolveDuplicate(group, preferredId);
@@ -991,6 +1038,16 @@ var SyncSettings = class extends import_obsidian3.PluginSettingTab {
     number("\u540C\u671F\u9593\u9694\uFF08\u5206\uFF09", "minutes", 1, 10080, true);
     toggle("\u8D77\u52D5\u6642\u306B\u540C\u671F", "startup");
     number("\u8D77\u52D5\u5F8C\u306E\u5F85\u6A5F\u6642\u9593\uFF08\u79D2\uFF09", "delay", 0, 3600, true);
+    new import_obsidian3.Setting(c).setName("Markdown\u3060\u3051\u540C\u671F").setDesc("\u753B\u50CF\u30FBPDF\u306A\u3069\u306E\u6DFB\u4ED8\u30D5\u30A1\u30A4\u30EB\u3092\u9664\u5916\u3057\u307E\u3059\u3002").addToggle((toggle2) => toggle2.setValue(s.markdownOnly ?? false).setDisabled(p.busy).onChange(async (value) => {
+      if (p.busy) return;
+      s.markdownOnly = value;
+      await p.persist();
+    }));
+    new import_obsidian3.Setting(c).setName("\u540C\u671F\u304B\u3089\u9664\u5916\u3059\u308B\u30D5\u30A1\u30A4\u30EB\u30FB\u30D5\u30A9\u30EB\u30C0").setDesc("\u4FDD\u7BA1\u5EAB\u304B\u3089\u306E\u76F8\u5BFE\u30D1\u30B9\u30921\u884C\u306B1\u3064\u5165\u529B\u3057\u307E\u3059\u3002\u4F8B: \u79C1\u7528 \u307E\u305F\u306F \u6DFB\u4ED8/\u52D5\u753B").addTextArea((input) => input.setValue(s.excludedPaths ?? "").setDisabled(p.busy).onChange(async (value) => {
+      if (p.busy) return;
+      s.excludedPaths = value;
+      await p.persist();
+    }));
     number("\u30D5\u30A1\u30A4\u30EB\u5BB9\u91CF\u4E0A\u9650\uFF08MB\u30FB\u4EE5\u4E0A\u3092\u9664\u5916\uFF09", "maxMB", 0.01, 100, false);
     action("\u624B\u52D5\u540C\u671F", "\u4ECA\u3059\u3050\u540C\u671F", async () => p.sync());
     new import_obsidian3.Setting(c).setName("\u6700\u7D42\u540C\u671F\u65E5\u6642").setDesc(p.state.last ? new Date(p.state.last).toLocaleString() : "\u672A\u5B9F\u884C");
@@ -1018,7 +1075,7 @@ var SyncSettings = class extends import_obsidian3.PluginSettingTab {
     for (const group of p.state.duplicates ?? []) action(group.path, "\u5143\u306E\u540D\u524D\u3067\u6B8B\u3059\u30D5\u30A1\u30A4\u30EB\u3092\u9078\u3076", async () => {
       new ChooseDuplicate(this.app, p, group, () => this.display()).open();
     });
-    c.createEl("p", { text: "Drive\u5185\u306E\u79FB\u52D5\u30FB\u540D\u524D\u5909\u66F4\u3092\u30D5\u30A1\u30A4\u30EBID\u3067\u8FFD\u8DE1\u3057\u307E\u3059\u3002\u79FB\u52D5\u5148\u306B\u5225\u30D5\u30A1\u30A4\u30EB\u304C\u3042\u308B\u3068\u9078\u629E\u5F85\u3061\u306B\u306A\u308A\u307E\u3059\u3002\u7F6E\u63DB\u524D\u306E\u5185\u5BB9\u306F AI Drive Sync/history \u306B\u6B8B\u3057\u307E\u3059\u3002\u30EA\u30F3\u30AF\u6587\u5B57\u5217\u306E\u81EA\u52D5\u66F8\u63DB\u3048\u306F\u884C\u3044\u307E\u305B\u3093\u3002" });
+    c.createEl("p", { text: "Drive\u5185\u306E\u79FB\u52D5\u30FB\u540D\u524D\u5909\u66F4\u3092\u30D5\u30A1\u30A4\u30EBID\u3067\u8FFD\u8DE1\u3057\u307E\u3059\u3002\u79FB\u52D5\u5148\u306B\u5225\u30D5\u30A1\u30A4\u30EB\u304C\u3042\u308B\u3068\u9078\u629E\u5F85\u3061\u306B\u306A\u308A\u307E\u3059\u3002\u7F6E\u63DB\u524D\u306E\u5185\u5BB9\u306F AI Drive Sync/history \u306B\u6B8B\u3057\u307E\u3059\u3002\u901A\u5E38\u306E\u79FB\u52D5\u30FB\u6539\u540D\u3067\u306FObsidian\u306E\u8A2D\u5B9A\u306B\u5F93\u3063\u3066\u5185\u90E8\u30EA\u30F3\u30AF\u3092\u66F4\u65B0\u3057\u307E\u3059\u3002" });
   }
   folderOptions;
 };
@@ -1103,9 +1160,20 @@ var ChooseConflict = class extends import_obsidian3.Modal {
       try {
         const local = new Local(this.app), target = m?.to ?? this.path;
         if (m) show("\u79FB\u52D5\u5143\u306E\u7AEF\u672B\u7248", await local.read(this.path), local.modifiedTime(this.path));
-        show("\u7AEF\u672B\u7248\uFF08\u79FB\u52D5\u5148\uFF09", await local.read(target), local.modifiedTime(target));
+        const localData = await local.read(target);
+        show("\u7AEF\u672B\u7248\uFF08\u79FB\u52D5\u5148\uFF09", localData, local.modifiedTime(target));
         const drive = new Drive(this.plugin.auth, this.plugin.settings.root), r = (await drive.list()).find((f) => f.path === target);
-        if (r) show("Drive\u7248\uFF08\u73FE\u5728\u306E\u5185\u5BB9\uFF09", r.size < this.plugin.settings.maxMB * 1024 * 1024 ? await drive.read(r) : void 0, r.modifiedTime);
+        if (!r || this.closed) return;
+        const remoteData = r.size < this.plugin.settings.maxMB * 1024 * 1024 ? await drive.read(r) : void 0;
+        show("Drive\u7248\uFF08\u73FE\u5728\u306E\u5185\u5BB9\uFF09", remoteData, r.modifiedTime);
+        if (this.closed || !localData || !remoteData || !target.toLowerCase().endsWith(".md")) return;
+        preview.createEl("h4", { text: "\u672C\u6587\u306E\u5DEE\u5206\uFF08\u2212 \u7AEF\u672B\u7248\u3001\uFF0B Drive\u7248\uFF09" });
+        try {
+          const decoder = new TextDecoder("utf-8", { fatal: true });
+          preview.createEl("pre", { text: lineDiff(decoder.decode(localData), decoder.decode(remoteData)) });
+        } catch {
+          preview.createEl("p", { text: "\u30C6\u30AD\u30B9\u30C8\u306E\u5DEE\u5206\u3092\u8868\u793A\u3067\u304D\u307E\u305B\u3093\u3002" });
+        }
       } catch {
         if (!this.closed) preview.createEl("p", { text: "\u30D7\u30EC\u30D3\u30E5\u30FC\u3092\u53D6\u5F97\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u63A5\u7D9A\u3092\u78BA\u8A8D\u3057\u3066\u958B\u304D\u76F4\u3057\u3066\u304F\u3060\u3055\u3044\u3002" });
       }

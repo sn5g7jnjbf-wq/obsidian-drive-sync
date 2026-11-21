@@ -1,7 +1,8 @@
 import {Plugin,PluginSettingTab,Setting,Notice,Modal,type App} from 'obsidian';
 import {Auth} from './auth';import {Drive,DuplicateFilesError} from './drive';import {Engine} from './engine';import {Local} from './local';
-import {defaults,loadSettings,emptyState,random,type Settings,type State,type Choice,type DuplicateGroup} from './model';
+import {defaults,loadSettings,emptyState,random,syncFilter,type Settings,type State,type Choice,type DuplicateGroup} from './model';
 import {FILE_SCOPE} from './pairing';
+import {lineDiff} from './line-diff';
 
 export default class DriveSync extends Plugin {
   settings:Settings={...defaults};state:State=emptyState();auth!:Auth;engine?:Engine;
@@ -45,7 +46,7 @@ export default class DriveSync extends Plugin {
       if(this.state.root!==this.settings.root) {this.state=emptyState(this.settings.root);await this.persist();}
       this.state.duplicates=[];
       this.engine=new Engine(new Local(this.app),new Drive(this.auth,this.settings.root),this.state,()=>this.persist());
-      const done=await this.engine.run(this.settings.maxMB*1024*1024);
+      const done=await this.engine.run(this.settings.maxMB*1024*1024,syncFilter(this.settings));
       this.status=done?`同期完了（Drive検出 ${this.engine.remotePaths.length}、取得 ${this.engine.downloaded}、送信 ${this.engine.uploaded}、除外 ${this.engine.excluded.length}、保留 ${this.engine.held.length}、競合 ${Object.keys(this.state.conflicts).length}）`:'同期を停止しました';
       if(done&&this.auth.scope===FILE_SCOPE)this.status+=' ⚠ 制限付き権限：Windowsで新規作成したファイルは取得できません。Windowsの認証ツールで推奨権限を選び、接続設定を取り込み直してください。';
       const count=Object.keys(this.state.moves??{}).length;if(count)this.status+=` 移動先の選択待ち ${count}件（設定画面で選択）`;
@@ -56,6 +57,8 @@ export default class DriveSync extends Plugin {
   async choose(path:string,choice:Choice,move:boolean){
     if(this.busy||this.unloaded)throw Error('同期中です。完了してから選択してください。');
     if(!this.ready||!this.auth.connected||this.state.root!==this.settings.root||!this.settings.backupConfirmed)throw Error('接続・同期先・バックアップ確認後、再同期してください。');
+    const includes=syncFilter(this.settings),destination=this.state.moves?.[path]?.to;
+    if(!includes(path)||(move&&destination&&!includes(destination)))throw Error('同期対象外のファイルです。');
     this.syncing=true;
     try{
       this.engine=new Engine(new Local(this.app),new Drive(this.auth,this.settings.root),this.state,()=>this.persist());
@@ -65,6 +68,7 @@ export default class DriveSync extends Plugin {
   }
   async chooseDuplicate(group:DuplicateGroup,preferredId:string){
     if(this.busy||this.unloaded||!this.auth.connected||this.state.root!==this.settings.root)throw Error('接続・同期先を確認し、同期終了後に選択してください。');
+    if(group.files.some(file=>!syncFilter(this.settings)(file.path)))throw Error('同期対象外のファイルです。');
     this.authBusy=true;
     try{await new Drive(this.auth,this.settings.root).resolveDuplicate(group,preferredId);this.state.duplicates=[];await this.persist();}
     finally{this.authBusy=false;}
@@ -97,6 +101,14 @@ class SyncSettings extends PluginSettingTab {
     const number=(name:string,key:'minutes'|'delay'|'maxMB',min:number,max:number,integer:boolean)=>new Setting(c).setName(name).addText(t=>t.setValue(String(s[key])).setDisabled(p.busy).onChange(async v=>{const n=Number(v);if(!p.busy&&v.trim()&&Number.isFinite(n)&&n>=min&&n<=max&&(!integer||Number.isInteger(n))){s[key]=n;await p.persist();p.schedule();}}));
     number('同期間隔（分）','minutes',1,10080,true);
     toggle('起動時に同期','startup');number('起動後の待機時間（秒）','delay',0,3600,true);
+    new Setting(c).setName('Markdownだけ同期').setDesc('画像・PDFなどの添付ファイルを除外します。')
+      .addToggle(toggle=>toggle.setValue(s.markdownOnly??false).setDisabled(p.busy).onChange(async value=>{
+        if(p.busy)return;s.markdownOnly=value;await p.persist();
+      }));
+    new Setting(c).setName('同期から除外するファイル・フォルダ').setDesc('保管庫からの相対パスを1行に1つ入力します。例: 私用 または 添付/動画')
+      .addTextArea(input=>input.setValue(s.excludedPaths??'').setDisabled(p.busy).onChange(async value=>{
+        if(p.busy)return;s.excludedPaths=value;await p.persist();
+      }));
     number('ファイル容量上限（MB・以上を除外）','maxMB',0.01,100,false);
     action('手動同期','今すぐ同期',async()=>p.sync());
     new Setting(c).setName('最終同期日時').setDesc(p.state.last?new Date(p.state.last).toLocaleString():'未実行');
@@ -112,7 +124,7 @@ class SyncSettings extends PluginSettingTab {
     for(const conflict of Object.values(p.state.moves??{}))action(conflict.from+' → '+conflict.to,'使う内容を選ぶ',async()=>{new ChooseConflict(this.app,p,conflict.from,true,()=>this.display()).open();});
     c.createEl('h3',{text:'Drive内の同名ファイル'});
     for(const group of p.state.duplicates??[])action(group.path,'元の名前で残すファイルを選ぶ',async()=>{new ChooseDuplicate(this.app,p,group,()=>this.display()).open();});
-    c.createEl('p',{text:'Drive内の移動・名前変更をファイルIDで追跡します。移動先に別ファイルがあると選択待ちになります。置換前の内容は AI Drive Sync/history に残します。リンク文字列の自動書換えは行いません。'});
+    c.createEl('p',{text:'Drive内の移動・名前変更をファイルIDで追跡します。移動先に別ファイルがあると選択待ちになります。置換前の内容は AI Drive Sync/history に残します。通常の移動・改名ではObsidianの設定に従って内部リンクを更新します。'});
   }
   private folderOptions?:{id:string;name:string}[];
 }
@@ -167,9 +179,18 @@ class ChooseConflict extends Modal {
       try{
         const local=new Local(this.app),target=m?.to??this.path;
         if(m)show('移動元の端末版',await local.read(this.path),local.modifiedTime(this.path));
-        show('端末版（移動先）',await local.read(target),local.modifiedTime(target));
+        const localData=await local.read(target);
+        show('端末版（移動先）',localData,local.modifiedTime(target));
         const drive=new Drive(this.plugin.auth,this.plugin.settings.root),r=(await drive.list()).find(f=>f.path===target);
-        if(r)show('Drive版（現在の内容）',r.size<this.plugin.settings.maxMB*1024*1024?await drive.read(r):undefined,r.modifiedTime);
+        if(!r||this.closed)return;
+        const remoteData=r.size<this.plugin.settings.maxMB*1024*1024?await drive.read(r):undefined;
+        show('Drive版（現在の内容）',remoteData,r.modifiedTime);
+        if(this.closed||!localData||!remoteData||!target.toLowerCase().endsWith('.md'))return;
+        preview.createEl('h4',{text:'本文の差分（− 端末版、＋ Drive版）'});
+        try{
+          const decoder=new TextDecoder('utf-8',{fatal:true});
+          preview.createEl('pre',{text:lineDiff(decoder.decode(localData),decoder.decode(remoteData))});
+        }catch{preview.createEl('p',{text:'テキストの差分を表示できません。'});}
       }catch{if(!this.closed)preview.createEl('p',{text:'プレビューを取得できませんでした。接続を確認して開き直してください。'});}
     })();
     const choices:[Choice,string,string][]=[

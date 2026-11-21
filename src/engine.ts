@@ -11,7 +11,7 @@ export class Engine {
     state.base=Object.assign(Object.create(null),state.base);
     state.conflicts=Object.assign(Object.create(null),state.conflicts);
   }
-  async run(limit:number):Promise<boolean> {
+  async run(limit:number,includes:(path:string)=>boolean=()=>true):Promise<boolean> {
     if(this.running||this.stopped) return false;
     if(!Number.isFinite(limit)||limit<=0)throw new Error('容量上限の設定が不正です。');
     this.running=true;
@@ -24,11 +24,12 @@ export class Engine {
       this.localPaths=locals.map(x=>x.path);this.remotePaths=remotes.map(x=>x.path);
       validatePaths(locals.map(x=>x.path)); validatePaths(remotes.map(x=>x.path));
       validatePaths([...new Set([...locals.map(x=>x.path),...remotes.map(x=>x.path)])]);
-      const blocked=await moves.scan(remotes,limit);
+      const blocked=await moves.scan(remotes,limit,includes);
       locals=await this.local.list();validatePaths([...new Set([...locals.map(x=>x.path),...remotes.map(x=>x.path)])]);
       const lm=new Map(locals.map(x=>[x.path,x])), rm=new Map(remotes.map(x=>[x.path,x]));
       for(const path of new Set([...lm.keys(),...rm.keys(),...Object.keys(this.state.base)])) {
         if(this.stopped) return false;
+        if(!includes(path)){this.excluded.push(path);continue;}
         if(blocked.has(path)){this.held.push(path+'（移動の確認・選択待ち）');continue;}
         const l=lm.get(path), r=rm.get(path), b=this.state.base[path];
         if((l&&l.size>=limit)||(r&&r.size>=limit)) {this.excluded.push(path);continue;}

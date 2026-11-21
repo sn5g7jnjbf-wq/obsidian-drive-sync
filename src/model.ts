@@ -1,4 +1,5 @@
 export interface Settings {
+  markdownOnly?:boolean; excludedPaths?:string;
   root: string; auto: boolean; minutes: number; startup: boolean;
   delay: number; maxMB: number; backupConfirmed: boolean; secretId: string;
 }
@@ -12,6 +13,8 @@ export function loadSettings(value:unknown):Settings {
   }
   if(typeof v.root==='string'&&v.root.length<=256)s.root=v.root.trim();
   if(typeof v.secretId==='string'&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(v.secretId))s.secretId=v.secretId;
+  s.markdownOnly=v.markdownOnly===true;
+  if(typeof v.excludedPaths==='string')s.excludedPaths=v.excludedPaths;
   return s;
 }
 export interface Base { hash: string; remoteId: string; version: string }
@@ -33,7 +36,7 @@ export interface LocalPort {
   list(): Promise<{path:string;size:number}[]>;
   read(path:string): Promise<ArrayBuffer | undefined>;
   create(path:string,data:ArrayBuffer): Promise<void>;
-  move(from:string,to:string,expectedHash:string):Promise<boolean>;
+  move(from:string,to:string,expectedHash:string,updateLinks?:boolean):Promise<boolean>;
   replace(path:string,data:ArrayBuffer,expectedHash:string): Promise<boolean>;
   archive(path:string,data:ArrayBuffer,category:'history'|'conflicts'): Promise<string>;
 }
@@ -64,4 +67,15 @@ export function validatePaths(paths:string[]):void {
   for(const p of paths) {const parts=p.split('/'); parts.pop(); while(parts.length) {
     if(seen.has(parts.join('/').normalize('NFC').toLowerCase())) throw new Error('ファイルとフォルダの衝突があります。'); parts.pop();
   }}
+}
+
+export function syncFilter(settings:Settings):(path:string)=>boolean {
+  const normalize=(value:string)=>value.normalize('NFC').toLowerCase();
+  const excluded=(settings.excludedPaths??'').split(/\r?\n/)
+    .map(line=>normalize(line.trim().replaceAll('\\','/').replace(/^\/+|\/+$/g,''))).filter(Boolean);
+  return path=>{
+    const key=normalize(path);
+    return (!settings.markdownOnly||key.endsWith('.md'))
+      && !excluded.some(prefix=>key===prefix||key.startsWith(prefix+'/'));
+  };
 }

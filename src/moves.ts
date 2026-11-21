@@ -9,7 +9,7 @@ export class Moves {
     this.state.base[to]=this.state.base[from];delete this.state.base[from];delete this.state.conflicts[from];
     delete this.state.moves![from];delete this.state.journal;await this.save();
   }
-  async scan(remotes:Remote[],limit:number):Promise<Set<string>>{
+  async scan(remotes:Remote[],limit:number,includes:(path:string)=>boolean):Promise<Set<string>>{
     const blocked=new Set<string>(),byId=new Map(remotes.map(r=>[r.id,r]));
     const pending=this.state.journal;
     if(pending?.kind==='move-local'){
@@ -18,7 +18,7 @@ export class Moves {
       const source=await this.local.read(from),target=await this.local.read(to);
       if(!source&&target&&await hash(target)===pending.hash)await this.migrate(from,to);
       else if(source&&!target&&await hash(source)===pending.hash){
-        if(!await this.local.move(from,to,pending.hash!))throw Error('中断した移動を再開できません。');
+        if(!await this.local.move(from,to,pending.hash!,true))throw Error('中断した移動を再開できません。');
         await this.migrate(from,to);
       }else throw Error('中断した移動のファイルが変更されています。上書きせず停止しました。');
     }
@@ -26,6 +26,7 @@ export class Moves {
       const r=byId.get(b.remoteId);
       if(!r||r.path===from){delete this.state.moves![from];continue;}
       const to=r.path;blocked.add(from);blocked.add(to);
+      if(!includes(from)||!includes(to)){delete this.state.moves![from];continue;}
       const source=await this.local.read(from),target=await this.local.read(to);
       if(this.state.base[to]&&this.state.base[to].remoteId!==r.id)continue;
       if(!source)continue;
@@ -38,7 +39,7 @@ export class Moves {
       const latest=await this.drive.fresh(r);
       if(latest.version!==r.version)throw Error('Driveで移動中の編集を検出しました。再同期してください。');
       this.state.journal={path:from,to,kind:'move-local',id:r.id,hash:sourceHash,at:Date.now()};await this.save();
-      if(!await this.local.move(from,to,sourceHash))throw Error('移動中に端末のファイルが変わりました。再同期してください。');
+      if(!await this.local.move(from,to,sourceHash,true))throw Error('移動中に端末のファイルが変わりました。再同期してください。');
       await this.migrate(from,to);blocked.delete(from);blocked.delete(to);
     }
     await this.save();return blocked;
